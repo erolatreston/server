@@ -2427,7 +2427,8 @@ public:
   void binlog_start_trans_and_stmt();
   void binlog_set_stmt_begin();
   int binlog_write_table_map(TABLE *table, bool is_transactional,
-                             my_bool *with_annotate= 0);
+                             my_bool *with_annotate= 0,
+                             bool stmt_modified_non_trans_table= false);
   int binlog_write_row(TABLE* table, bool is_transactional,
                        const uchar *buf);
   int binlog_delete_row(TABLE* table, bool is_transactional,
