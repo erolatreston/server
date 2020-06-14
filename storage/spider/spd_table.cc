@@ -7280,6 +7280,7 @@ int spider_db_init(
     spider_hton->rollback_by_xid = spider_xa_rollback_by_xid;
   }
   spider_hton->create = spider_create_handler;
+  spider_hton->drop_table= [](handlerton *, const char*) { return 0; };
   spider_hton->drop_database = spider_drop_database;
   spider_hton->show_status = spider_show_status;
 #ifdef SPIDER_HAS_GROUP_BY_HANDLER
