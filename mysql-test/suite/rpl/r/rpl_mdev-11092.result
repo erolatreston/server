@@ -1,7 +1,10 @@
 include/master-slave.inc
 [connection master]
 call mtr.add_suppression("Unsafe statement written to the binary log using statement format since BINLOG_FORMAT = STATEMENT");
-call mtr.add_suppression("Slave SQL: The incident LOST_EVENTS occurred on the master. .*");
+call mtr.add_suppression("Slave SQL: The incident LOST_EVENTS occurred on the master");
+call mtr.add_suppression("Write to binary log failed: Multi-row statements required more than .max_binlog_stmt_cache_size");
+call mtr.add_suppression("Write to binary log failed: Multi-statement transaction required more than .max_binlog_cache_size");
+"*********** Annotate Event write failure **************"
 SET GLOBAL max_binlog_cache_size = 4096;
 SET GLOBAL binlog_cache_size = 4096;
 SET GLOBAL max_binlog_stmt_cache_size = 4096;
@@ -10,12 +13,76 @@ disconnect master;
 connect  master,127.0.0.1,root,,test,$MASTER_MYPORT,;
 CREATE TABLE t1(a INT PRIMARY KEY, data VARCHAR(30000)) ENGINE=MYISAM;
 connection master;
-ERROR HY000: Writing one row to the row-based binary log failed
+"#######################################################################"
+"# Test Case1: Annotate event write failure for MyISAM                 #"
+"#######################################################################"
+ERROR HY000: Multi-row statements required more than 'max_binlog_stmt_cache_size' bytes of storage; increase this mysqld variable and try again
+include/wait_for_slave_sql_error_and_skip.inc [errno=1590]
+"#######################################################################"
+"# Test Case2: Annotate event write failure for INNODB                 #"
+"#######################################################################"
+connection master;
+CREATE TABLE t2(a INT PRIMARY KEY, data VARCHAR(30000)) ENGINE=INNODB;
+ERROR HY000: Multi-statement transaction required more than 'max_binlog_cache_size' bytes of storage; increase this mysqld variable and try again
+"*** One row will be present as second row will be rolledback ***"
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+connection slave;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+"#######################################################################"
+"# Test Case3: Annotate event write failure for mixed engine UPDATE    #"
+"#######################################################################"
+connection master;
+ERROR HY000: Multi-row statements required more than 'max_binlog_stmt_cache_size' bytes of storage; increase this mysqld variable and try again
 include/wait_for_slave_sql_error_and_skip.inc [errno=1590]
 connection master;
+"****** Clean up *******"
 SET GLOBAL max_binlog_cache_size= ORIGINAL_VALUE;
 SET GLOBAL binlog_cache_size= ORIGINAL_VALUE;
 SET GLOBAL max_binlog_stmt_cache_size= ORIGINAL_VALUE;
 SET GLOBAL binlog_stmt_cache_size= ORIGINAL_VALUE;
-DROP TABLE t1;
+DROP TABLE t1,t2;
+"*********** TABLE MAP Event write failure **************"
+SET @save_debug= @@GLOBAL.debug_dbug;
+CREATE TABLE tm (f INT) ENGINE=MYISAM;
+CREATE TABLE ti (f INT) ENGINE=INNODB;
+INSERT INTO tm VALUES (10);
+INSERT INTO ti VALUES (20);
+connection slave;
+"#######################################################################"
+"# Test Case4: Table_map event write failure for mixed engine UPDATE   #"
+"#######################################################################"
+connection master;
+SET debug_dbug="+d,table_map_write_error";
+"In case of mixed engines if non trans table is updated write INCIDENT event"
+UPDATE ti,tm SET tm.f=88, ti.f=120;
+ERROR HY000: Multi-statement transaction required more than 'max_binlog_cache_size' bytes of storage; increase this mysqld variable and try again
+include/wait_for_slave_sql_error_and_skip.inc [errno=1590]
+"On Slave non trans table should be updated one row with f=88 should be found"
+SELECT * FROM tm WHERE f=88;
+f
+88
+"On Innodb table 'ti' no update should be done no row exists with f=120"
+SELECT COUNT(*) FROM ti WHERE f=120;
+COUNT(*)
+0
+"#######################################################################"
+"# Test Case5: Table_map event write failure for trans engine UPDATE   #"
+"#######################################################################"
+"Transaction will be rolled back. No incident event is written."
+connection master;
+UPDATE ti, tm set ti.f=30;
+ERROR HY000: Multi-statement transaction required more than 'max_binlog_cache_size' bytes of storage; increase this mysqld variable and try again
+"Verify on master that no rows exists with f=30"
+SELECT COUNT(*) FROM ti WHERE f=30;
+COUNT(*)
+0
+connection slave;
+connection master;
+"******** Clean Up **********"
+SET GLOBAL debug_dbug= @save_debug;
+DROP TABLE tm,ti;
 include/rpl_end.inc

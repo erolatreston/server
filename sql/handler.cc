@@ -6243,7 +6243,28 @@ static int write_locked_table_maps(THD *thd)
       continue;
 
     TABLE **const end_ptr= lock->table + lock->table_count;
-    for (TABLE **table_ptr= lock->table ; 
+    bool stmt_modified_non_trans_table= false;
+    /*
+      Iterate through list of tables and identify if multi statement
+      transaction modifies any non transactional table. Set the
+      'stmt_modified_non_trans_table' flag to 'true'. In case if there a
+      failure at the time of writing annotate/table_map event into the binary
+      log this flag will enable server to write an incident event into the
+      binary log. This additional flag is required as
+      'thd->transaction.stmt.modified_non_trans_table' will not available at
+      the time of writing table_map/annotate event.
+    */
+    for (TABLE **table_ptr= lock->table; table_ptr != end_ptr ; ++table_ptr)
+    {
+      TABLE *const table= *table_ptr;
+      if (!table->file->has_transactions() && table->current_lock == F_WRLCK)
+      {
+        fprintf(stderr, "Checking table %s\n", table->s->table_name.str);
+        stmt_modified_non_trans_table=true;
+        break;
+      }
+    }
+    for (TABLE **table_ptr= lock->table ;
          table_ptr != end_ptr ;
          ++table_ptr)
     {
@@ -6267,8 +6288,10 @@ static int write_locked_table_maps(THD *thd)
         */
         bool const has_trans= thd->lex->sql_command == SQLCOM_CREATE_TABLE ||
           table->file->has_transactions();
+
         int const error= thd->binlog_write_table_map(table, has_trans,
-                                                     &with_annotate);
+                                                     &with_annotate,
+                                                     stmt_modified_non_trans_table);
         /*
           If an error occurs, it is the responsibility of the caller to
           roll back the transaction.

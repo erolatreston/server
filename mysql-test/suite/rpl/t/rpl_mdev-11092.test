@@ -1,3 +1,4 @@
+--source include/have_debug.inc
 --source include/have_innodb.inc
 --source include/not_embedded.inc
 --source include/not_windows.inc
@@ -6,12 +7,16 @@
 
 ########################################################################################
 call mtr.add_suppression("Unsafe statement written to the binary log using statement format since BINLOG_FORMAT = STATEMENT");
-call mtr.add_suppression("Slave SQL: The incident LOST_EVENTS occurred on the master. .*");
+call mtr.add_suppression("Slave SQL: The incident LOST_EVENTS occurred on the master");
+call mtr.add_suppression("Write to binary log failed: Multi-row statements required more than .max_binlog_stmt_cache_size");
+call mtr.add_suppression("Write to binary log failed: Multi-statement transaction required more than .max_binlog_cache_size");
 
 let $old_max_binlog_cache_size= query_get_value(SHOW VARIABLES LIKE "max_binlog_cache_size", Value, 1);
 let $old_binlog_cache_size= query_get_value(SHOW VARIABLES LIKE "binlog_cache_size", Value, 1);
 let $old_max_binlog_stmt_cache_size= query_get_value(SHOW VARIABLES LIKE "max_binlog_stmt_cache_size", Value, 1);
 let $old_binlog_stmt_cache_size= query_get_value(SHOW VARIABLES LIKE "binlog_stmt_cache_size", Value, 1);
+
+--echo "*********** Annotate Event write failure **************"
 
 SET GLOBAL max_binlog_cache_size = 4096;
 SET GLOBAL binlog_cache_size = 4096;
@@ -26,8 +31,19 @@ let $data = `select concat('"', repeat('a',2000), '"')`;
 
 connection master;
 
+# Insert a huge row into MyISAM table. The row will be inserted in engine and a
+# request to write to binary log will be initiated. Since row annotations are
+# enabled the size of the annotate event itself will exceed the
+# "max_binlog_stmt_cache_size". This will result in ER_STMT_CACHE_FULL error
+# and an incident event will be written to the binary log as row update in
+# engine cannot be undone.
+
+--echo "#######################################################################"
+--echo "# Test Case1: Annotate event write failure for MyISAM                 #"
+--echo "#######################################################################"
+
 --disable_query_log
---error ER_BINLOG_ROW_LOGGING_FAILED
+--error ER_STMT_CACHE_FULL
 eval INSERT INTO t1 (a, data) VALUES (2,
        CONCAT($data, $data, $data, $data, $data, $data));
 --enable_query_log
@@ -37,8 +53,59 @@ eval INSERT INTO t1 (a, data) VALUES (2,
 --let $slave_sql_errno= 1590
 --source include/wait_for_slave_sql_error_and_skip.inc
 
-connection master;
+# MDEV-21087
+# Insert two huge rows in to transaction cache. Have data such that first row
+# fits inside the binary log cache. While writing the annotate event for the
+# second row the binary log cache size will exceed "max_binlog_cache_size".
+# Hence this statement cannot be written to binary log. As DMLs in Innodb can
+# be safely rolled back only an error will be reported. Slave will continue to
+# work.
 
+--echo "#######################################################################"
+--echo "# Test Case2: Annotate event write failure for INNODB                 #"
+--echo "#######################################################################"
+
+--connection master
+CREATE TABLE t2(a INT PRIMARY KEY, data VARCHAR(30000)) ENGINE=INNODB;
+--disable_query_log
+BEGIN;
+eval INSERT INTO t2 (a, data) VALUES (1, CONCAT($data, $data));
+--error ER_TRANS_CACHE_FULL
+eval INSERT INTO t2 (a, data) VALUES (2, CONCAT($data, $data));
+COMMIT;
+--enable_query_log
+
+--echo "*** One row will be present as second row will be rolledback ***"
+SELECT COUNT(*) FROM t2;
+--sync_slave_with_master
+SELECT COUNT(*) FROM t2;
+
+# Testing mixed engine UPDATE statement scenario. In the following multi
+# update query 'ha_update_row' will be invoked for t1 (myisam) table. This
+# intern invokes binlog_write_table_map() function call. While writing a huge
+# annotate event binary log cache size will exceed max_binlog_cache_size.
+# Writing to binary log fails. Since non transactional changes cannot be
+# rolled back incident event will be written to binary log.
+
+--echo "#######################################################################"
+--echo "# Test Case3: Annotate event write failure for mixed engine UPDATE    #"
+--echo "#######################################################################"
+
+--connection master
+let $new_data = `select concat('"', repeat('b',2000), '"')`;
+--disable_query_log
+--error ER_STMT_CACHE_FULL
+eval UPDATE t1,t2 SET t1.data="Hello", t2.data=CONCAT($new_data,$new_data,$new_data,$new_data,$new_data);
+--enable_query_log
+
+# Incident event
+# 1590=ER_SLAVE_INCIDENT
+--let $slave_sql_errno= 1590
+--source include/wait_for_slave_sql_error_and_skip.inc
+
+--connection master
+
+--echo "****** Clean up *******"
 --replace_result $old_max_binlog_cache_size ORIGINAL_VALUE
 --eval SET GLOBAL max_binlog_cache_size= $old_max_binlog_cache_size
 --replace_result $old_binlog_cache_size ORIGINAL_VALUE
@@ -48,6 +115,52 @@ connection master;
 --replace_result $old_binlog_stmt_cache_size ORIGINAL_VALUE
 --eval SET GLOBAL binlog_stmt_cache_size= $old_binlog_stmt_cache_size
 
-DROP TABLE t1;
+DROP TABLE t1,t2;
+
+--echo "*********** TABLE MAP Event write failure **************"
+
+SET @save_debug= @@GLOBAL.debug_dbug;
+CREATE TABLE tm (f INT) ENGINE=MYISAM;
+CREATE TABLE ti (f INT) ENGINE=INNODB;
+INSERT INTO tm VALUES (10);
+INSERT INTO ti VALUES (20);
+--sync_slave_with_master
+
+--echo "#######################################################################"
+--echo "# Test Case4: Table_map event write failure for mixed engine UPDATE   #"
+--echo "#######################################################################"
+--connection master
+SET debug_dbug="+d,table_map_write_error";
+--echo "In case of mixed engines if non trans table is updated write INCIDENT event"
+--error ER_TRANS_CACHE_FULL
+UPDATE ti,tm SET tm.f=88, ti.f=120;
+
+# Incident event
+# 1590=ER_SLAVE_INCIDENT
+--let $slave_sql_errno= 1590
+--source include/wait_for_slave_sql_error_and_skip.inc
+
+--echo "On Slave non trans table should be updated one row with f=88 should be found"
+SELECT * FROM tm WHERE f=88;
+
+--echo "On Innodb table 'ti' no update should be done no row exists with f=120"
+SELECT COUNT(*) FROM ti WHERE f=120;
+
+--echo "#######################################################################"
+--echo "# Test Case5: Table_map event write failure for trans engine UPDATE   #"
+--echo "#######################################################################"
+--echo "Transaction will be rolled back. No incident event is written."
+--connection master
+--error ER_TRANS_CACHE_FULL
+UPDATE ti, tm set ti.f=30;
+--echo "Verify on master that no rows exists with f=30"
+SELECT COUNT(*) FROM ti WHERE f=30;
+
+--sync_slave_with_master
+
+--connection master
+--echo "******** Clean Up **********"
+SET GLOBAL debug_dbug= @save_debug;
+DROP TABLE tm,ti;
 
 --source include/rpl_end.inc

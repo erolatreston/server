@@ -2102,7 +2102,15 @@ static int binlog_rollback(handlerton *hton, THD *thd, bool all)
     error= binlog_commit_flush_stmt_cache(thd, all, cache_mngr);
   }
 
-  if (cache_mngr->trx_cache.empty())
+  /*
+     An incident event would have been set if a multi statement transaction
+     which tried to update both trans/non-trans table failed to write an event
+     to cache. In this case partial updates would have been done in non
+     transactional storage engine and safe rollback is not possible. In this
+     case don't reset the cache, proceed further for cache write error handling
+     part.
+  */
+  if (!cache_mngr->trx_cache.has_incident() && cache_mngr->trx_cache.empty())
   {
     /*
       we're here because cache_log was flushed in MYSQL_BIN_LOG::log_xid()
@@ -5729,14 +5737,14 @@ binlog_start_consistent_snapshot(handlerton *hton, THD *thd)
 }
 
 /**
-  This function writes a table map to the binary log. 
+  This function writes a table map to the binary log.
   Note that in order to keep the signature uniform with related methods,
   we use a redundant parameter to indicate whether a transactional table
   was changed or not.
 
   If with_annotate != NULL and
   *with_annotate = TRUE write also Annotate_rows before the table map.
- 
+
   @param table             a pointer to the table.
   @param is_transactional  @c true indicates a transactional table,
                            otherwise @c false a non-transactional.
@@ -5744,7 +5752,8 @@ binlog_start_consistent_snapshot(handlerton *hton, THD *thd)
     nonzero if an error pops up when writing the table map event.
 */
 int THD::binlog_write_table_map(TABLE *table, bool is_transactional,
-                                my_bool *with_annotate)
+                                my_bool *with_annotate,
+                                bool stmt_modified_non_trans_table)
 {
   int error;
   DBUG_ENTER("THD::binlog_write_table_map");
@@ -5755,7 +5764,7 @@ int THD::binlog_write_table_map(TABLE *table, bool is_transactional,
   /* Ensure that all events in a GTID group are in the same cache */
   if (variables.option_bits & OPTION_GTID_BEGIN)
     is_transactional= 1;
-  
+
   /* Pre-conditions */
   DBUG_ASSERT(is_current_stmt_binlog_format_row());
   DBUG_ASSERT(WSREP_EMULATE_BINLOG(this) || mysql_bin_log.is_open());
@@ -5779,18 +5788,37 @@ int THD::binlog_write_table_map(TABLE *table, bool is_transactional,
     Annotate_rows_log_event anno(table->in_use, is_transactional, false);
     /* Annotate event should be written not more than once */
     *with_annotate= 0;
-    if (unlikely((error= writer.write(&anno))))
-    {
-      if (my_errno == EFBIG)
-        cache_data->set_incident();
-      DBUG_RETURN(error);
-    }
+    if ((error= writer.write(&anno)))
+      goto write_err;
   }
-  if (unlikely((error= writer.write(&the_event))))
-    DBUG_RETURN(error);
+  DBUG_EXECUTE_IF("table_map_write_error",
+    {
+      if (is_transactional)
+      {
+        my_errno= EFBIG;
+        error= 1;
+        goto write_err;
+      }
+    });
+  if ((error= writer.write(&the_event)))
+    goto write_err;
 
-  binlog_table_maps++;
-  DBUG_RETURN(0);
+	binlog_table_maps++;
+	DBUG_RETURN(0);
+
+write_err:
+  mysql_bin_log.set_write_error(this, is_transactional);
+  /*
+    For non-transactional engine or multi statement transaction with mixed
+    engines, data is written to table but writing to binary log failed. In
+    these scenarios rollback is not possible. Hence report an incident.
+  */
+  if (mysql_bin_log.check_write_error(this) && cache_data &&
+      stmt_modified_non_trans_table)
+  {
+    cache_data->set_incident();
+  }
+  DBUG_RETURN(error);
 }
 
 /**
@@ -7249,6 +7277,18 @@ bool MYSQL_BIN_LOG::write_incident(THD *thd)
   else
   {
     mysql_mutex_unlock(&LOCK_log);
+  }
+
+	/*
+		Upon writing incident event, check for thd->error() and print the
+		relevant error message in the error log.
+	*/
+  if (!error && thd->is_error())
+  {
+    sql_print_error("Write to binary log failed: "
+                    "%s. An incident event is written to binary log "
+                    "and slave will be stopped.\n",
+                    thd->get_stmt_da()->message());
   }
 
   DBUG_RETURN(error);
