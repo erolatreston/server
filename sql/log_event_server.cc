@@ -742,6 +742,16 @@ my_bool Log_event::need_checksum()
 {
   my_bool ret;
   DBUG_ENTER("Log_event::need_checksum");
+
+  /*
+    If OPTION_BIN_COMMIT_OFF is set for a Query_log_event (thd is always set for
+    these), then this commit will be logged in the same write with other
+    commits and checksum will be written during MYSQL_BIN_LOG::write_cache()
+  */
+  if (thd && (thd->variables.option_bits &
+              (OPTION_GTID_BEGIN |OPTION_BIN_COMMIT_OFF)))
+    DBUG_RETURN(0);
+
   /* 
      few callers of Log_event::write 
      (incl FD::write, FD constructing code on the slave side, Rotate relay log
