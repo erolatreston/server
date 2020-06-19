@@ -6503,6 +6503,8 @@ bool MYSQL_BIN_LOG::write(Log_event *event_info, my_bool *with_annotate)
     /* Wait for commit from binary log before we commit */
     direct= 0;
     using_trans= 1;
+    /* Set cache_type to ensure we don't get checksums for this event */
+    event_info->cache_type= Log_event::EVENT_TRANSACTIONAL_CACHE;
   }
 
   if (thd->binlog_evt_union.do_union)
