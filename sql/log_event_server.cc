@@ -736,8 +736,10 @@ void Log_event::init_show_field_list(THD *thd, List<Item>* field_list)
    @note   A side effect of the method is altering Log_event::checksum_alg
            it the latter was undefined at calling.
 
-   @return true (positive) or false (negative)
+   @return true   Checksum should be used. Log_event::checksum_alg is set.
+   @return false  No checksum
 */
+
 my_bool Log_event::need_checksum()
 {
   my_bool ret;
