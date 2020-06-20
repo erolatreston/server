@@ -1784,7 +1784,8 @@ static void store_freed_or_init_rec(page_id_t page_id, bool freed)
 {
   uint32_t space_id= page_id.space();
   uint32_t page_no= page_id.page_no();
-  if (is_predefined_tablespace(space_id))
+  if (is_predefined_tablespace(space_id)
+      && srv_immediate_scrub_data_uncompressed)
   {
     fil_space_t *space;
     if (space_id == TRX_SYS_SPACE)
@@ -3285,7 +3286,9 @@ recv_init_crash_recovery_spaces(bool rescan, bool& missing_tablespace)
 
 			/* Add the freed page ranges in the respective
 			tablespace */
-			if (!rs.second.freed_ranges.empty())
+			if (!rs.second.freed_ranges.empty()
+                            && (srv_immediate_scrub_data_uncompressed
+                                || rs.second.space->is_compressed()))
 			  rs.second.space->add_free_ranges(
 					std::move(rs.second.freed_ranges));
 		} else if (rs.second.name == "") {

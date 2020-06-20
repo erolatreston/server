@@ -274,7 +274,7 @@ new_range:
   }
 
   /** Find whether the value present in ranges
-  @param[in] value value to be searched */
+  @param[in] value value to be removed */
   void remove_if_exists(uint32_t value)
   {
     range_t new_range{value, value};
@@ -284,6 +284,20 @@ new_range:
       r_offset= std::prev(r_end);
     if (r_offset->first <= value && r_offset->last >= value)
       remove_within_range(r_offset, value);
+  }
+
+  /** Search the value present in ranges
+  @param[in] value value to be searched */
+  bool find(uint32_t value)
+  {
+    range_t new_range{value, value};
+    auto r_offset= ranges.lower_bound(new_range);
+    auto r_end= ranges.end();
+    if (r_offset == r_end)
+      r_offset= std::prev(r_end);
+    if (r_offset->first <= value && r_offset->last >= value)
+      return true;
+    return false;
   }
 
   ulint size() { return ranges.size(); }
