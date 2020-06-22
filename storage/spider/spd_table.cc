@@ -7249,7 +7249,7 @@ int spider_db_init(
   DBUG_ENTER("spider_db_init");
   spider_hton_ptr = spider_hton;
 
-  spider_hton->flags = HTON_NO_FLAGS | HTON_AUTOMATIC_DELETE_TABLE;
+  spider_hton->flags = HTON_NO_FLAGS;
 #ifdef HTON_CAN_READ_CONNECT_STRING_IN_PARTITION
   spider_hton->flags |= HTON_CAN_READ_CONNECT_STRING_IN_PARTITION;
 #endif
@@ -7280,7 +7280,7 @@ int spider_db_init(
     spider_hton->rollback_by_xid = spider_xa_rollback_by_xid;
   }
   spider_hton->create = spider_create_handler;
-  spider_hton->drop_table= [](handlerton *, const char*) { return 0; };
+  spider_hton->drop_table= [](handlerton *, const char*) { return -1; };
   spider_hton->drop_database = spider_drop_database;
   spider_hton->show_status = spider_show_status;
 #ifdef SPIDER_HAS_GROUP_BY_HANDLER
