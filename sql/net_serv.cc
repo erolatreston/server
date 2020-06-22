@@ -178,6 +178,14 @@ my_bool my_net_init(NET *net, Vio *vio, void *thd, uint my_flags)
   DBUG_RETURN(0);
 }
 
+
+void net_reset_new_packet(NET *net)
+{
+  net->buff_end= net->buff + net->max_packet;
+  net->write_pos= net->read_pos= net->buff;
+}
+
+
 my_bool net_allocate_new_packet(NET *net, void *thd, uint my_flags)
 {
   DBUG_ENTER("net_allocate_new_packet");
@@ -186,8 +194,7 @@ my_bool net_allocate_new_packet(NET *net, void *thd, uint my_flags)
 				     NET_HEADER_SIZE + COMP_HEADER_SIZE + 1,
 				     MYF(MY_WME | my_flags))))
     DBUG_RETURN(1);
-  net->buff_end=net->buff+net->max_packet;
-  net->write_pos=net->read_pos = net->buff;
+  net_reset_new_packet(net);
   DBUG_RETURN(0);
 }
 

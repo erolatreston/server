@@ -942,6 +942,9 @@ static bool insert_bulk_params(Prepared_statement *stmt,
       case STMT_INDICATOR_IGNORE:
         param->set_ignore();
         break;
+      default:
+        DBUG_ASSERT(0);
+        DBUG_RETURN(1);
       }
     }
     else
